@@ -1,0 +1,26 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DATABASE_URL_UNPOOLED")
+}
+
+model Pelanggan {
+  id         Int      @id @default(autoincrement())
+  nama       String
+  kecamatan  String   @default("Kepanjen")
+  desa       String
+  rt         String
+  tagihan    Int
+  lunas      Staturs_Pembayaran  @default(Belum_Lunas)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+enum Staturs_Pembayaran{
+  Lunas
+  Belum_Lunas
+}

@@ -1,0 +1,11 @@
+### Test Ambil Data Pelanggan
+GET http://localhost:5000/api/pelanggan
+
+### Test Pembayaran Quennet
+POST http://localhost:5000/api/bayar
+Content-Type: application/json
+
+{
+  "idPelanggan": 1,
+  "uangDiterima": 200000
+}

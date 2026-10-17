@@ -119,23 +119,63 @@ app.post('/api/auth/login', async (req, res) => {
 
 
 
-// 1. Ambil Semua Data Pelanggan (dengan filter desa & rt)
+// 1. Ambil Pelanggan Lengkap dengan Status Lunas Bulan Ini
 app.get('/api/pelanggan', verifikasiRole(['ADMIN', 'PENAGIH']), async (req, res) => {
   try {
-    const { desa, rt } = req.query;
+    const { desa, rt, bulan, tahun } = req.query;
+
+    const waktuSekarang = new Date();
+    const targetBulan = bulan ? Number(bulan) : waktuSekarang.getMonth() + 1;
+    const targetTahun = tahun ? Number(tahun) : waktuSekarang.getFullYear();
 
     const whereClause = {};
     if (desa) whereClause.desa = desa;
     if (rt) whereClause.rt = rt;
 
-    const dataPelanggan = await prisma.pelanggan.findMany({
-      where: whereClause
+    // Ambil data pelanggan beserta pembayaran KHUSUS di bulan & tahun target
+    const listPelanggan = await prisma.pelanggan.findMany({
+      where: whereClause,
+      include: {
+        pembayaran: {
+          where: {
+            bulan: targetBulan,
+            tahun: targetTahun
+          }
+        }
+      },
+      orderBy: { nama: 'asc' }
+    });
+
+    // Format data agar front-end Next.js mudah membacanya
+    const dataFormatted = listPelanggan.map((p) => {
+      const infoBayar = p.pembayaran[0] || null;
+      return {
+        id: p.id,
+        nama: p.nama,
+        kecamatan: p.kecamatan,
+        desa: p.desa,
+        rt: p.rt,
+        tagihan: p.tagihan,
+        periodeBulan: targetBulan,
+        periodeTahun: targetTahun,
+        isLunas: infoBayar ? true : false,
+        statusPembayaran: infoBayar ? 'Lunas' : 'Belum_Lunas',
+        detailPembayaran: infoBayar
+          ? {
+              uangDiterima: infoBayar.nominalDiterima,
+              kembalian: infoBayar.kembalian,
+              penagih: infoBayar.namaPenagih,
+              tanggalBayar: infoBayar.createdAt
+            }
+          : null
+      };
     });
 
     res.json({
       status: 'sukses',
-      totalData: dataPelanggan.length,
-      data: dataPelanggan
+      periode: `${targetBulan}/${targetTahun}`,
+      totalData: dataFormatted.length,
+      data: dataFormatted
     });
   } catch (error) {
     res.status(500).json({ status: 'error', pesan: error.message });

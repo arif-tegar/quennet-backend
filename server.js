@@ -4,11 +4,123 @@ const { PrismaClient } = require('@prisma/client');
 const app = express();
 const prisma = new PrismaClient();
 const PORT = process.env.PORT || 5000;
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+
+const JWT_SECRET = process.env.JWT_SECRET || 'kunci_rahasia_quennet_super_aman_123';
 
 app.use(express.json());
 
+// Middleware untuk mengecek token & role
+const verifikasiRole = (rolesDiizinkan = []) => {
+  return (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+
+    // Format header: "Bearer <token>"
+    const token = authHeader && authHeader.split(' ')[1];
+
+    if (!token) {
+      return res.status(401).json({ status: 'gagal', pesan: 'Akses ditolak! Anda belum login.' });
+    }
+
+    try {
+      const decoded = jwt.verify(token, JWT_SECRET);
+      req.user = decoded; // Menyimpan data user (id, role, nama) ke request
+
+      // Cek apakah role user cocok dengan rute yang dituju
+      if (rolesDiizinkan.length > 0 && !rolesDiizinkan.includes(decoded.role)) {
+        return res.status(403).json({
+          status: 'gagal',
+          pesan: `Akses dilarang! Role '${decoded.role}' tidak memiliki izin untuk fitur ini.`
+        });
+      }
+
+      next(); // Lolos pemeriksaan, silakan lanjut ke fungsi rute
+    } catch (err) {
+      return res.status(403).json({ status: 'gagal', pesan: 'Token tidak valid atau sudah kadaluwarsa.' });
+    }
+  };
+};
+
+// Registrasi Akun Baru (Hanya bisa dibuat awal atau oleh Admin)
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { username, password, nama, role } = req.body;
+
+    if (!username || !password || !nama) {
+      return res.status(400).json({ status: 'gagal', pesan: 'Username, password, dan nama wajib diisi' });
+    }
+
+    // Acak password sebelum disimpan ke database
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    const userBaru = await prisma.user.create({
+      data: {
+        username: username.toLowerCase(),
+        password: passwordHash,
+        nama,
+        role: role ? role.toUpperCase() : 'PENAGIH'
+      }
+    });
+
+    res.status(201).json({
+      status: 'sukses',
+      pesan: `User ${userBaru.username} dengan role ${userBaru.role} berhasil dibuat!`,
+      data: { id: userBaru.id, username: userBaru.username, nama: userBaru.nama, role: userBaru.role }
+    });
+  } catch (error) {
+    if (error.code === 'P2002') {
+      return res.status(400).json({ status: 'gagal', pesan: 'Username sudah digunakan!' });
+    }
+    res.status(500).json({ status: 'error', pesan: error.message });
+  }
+});
+
+// Login Akun & Terbitkan Token
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { username, password } = req.body;
+
+    const user = await prisma.user.findUnique({
+      where: { username: username ? username.toLowerCase() : '' }
+    });
+
+    if (!user) {
+      return res.status(404).json({ status: 'gagal', pesan: 'Username atau password salah!' });
+    }
+
+    // Bandingkan password inputan dengan hash di database
+    const passwordCocok = await bcrypt.compare(password, user.password);
+    if (!passwordCocok) {
+      return res.status(400).json({ status: 'gagal', pesan: 'Username atau password salah!' });
+    }
+
+    // Buat tiket token JWT (berlaku 7 hari)
+    const token = jwt.sign(
+      { id: user.id, username: user.username, role: user.role, nama: user.nama },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    res.json({
+      status: 'sukses',
+      pesan: 'Login berhasil!',
+      token,
+      user: {
+        id: user.id,
+        nama: user.nama,
+        role: user.role
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ status: 'error', pesan: error.message });
+  }
+});
+
+
+
 // 1. Ambil Semua Data Pelanggan (dengan filter desa & rt)
-app.get('/api/pelanggan', async (req, res) => {
+app.get('/api/pelanggan', verifikasiRole(['ADMIN', 'PENAGIH']), async (req, res) => {
   try {
     const { desa, rt } = req.query;
 
@@ -31,7 +143,7 @@ app.get('/api/pelanggan', async (req, res) => {
 });
 
 // 2. Admin Menambah Pelanggan Baru
-app.post('/api/pelanggan', async (req, res) => {
+app.post('/api/pelanggan', verifikasiRole(['ADMIN']), async (req, res) => {
   try {
     const { nama, kecamatan, desa, rt, tagihan } = req.body;
 
@@ -63,39 +175,19 @@ app.post('/api/pelanggan', async (req, res) => {
 });
 
 // 3. Admin Mengubah (Edit) Data Pelanggan Berdasarkan ID
-app.put('/api/pelanggan/:id', async (req, res) => {
+app.get('/api/pelanggan/:id/riwayat', verifikasiRole(['ADMIN', 'PENAGIH']), async (req, res) => {
   try {
-    const { id } = req.params; // Mengambil ID dari parameter URL (:id)
-    const { nama, kecamatan, desa, rt, tagihan } = req.body;
+    const { id } = req.params;
 
-    // Periksa apakah pelanggan dengan ID ini ada
-    const pelangganAda = await prisma.pelanggan.findUnique({
-      where: { id: Number(id) }
-    });
-
-    if (!pelangganAda) {
-      return res.status(404).json({
-        status: 'gagal',
-        pesan: `Pelanggan dengan ID ${id} tidak ditemukan`
-      });
-    }
-
-    // Perbarui data pelanggan di database
-    const pelangganDiperbarui = await prisma.pelanggan.update({
-      where: { id: Number(id) },
-      data: {
-        nama: nama || pelangganAda.nama,
-        kecamatan: kecamatan || pelangganAda.kecamatan,
-        desa: desa || pelangganAda.desa,
-        rt: rt || pelangganAda.rt,
-        tagihan: tagihan !== undefined ? Number(tagihan) : pelangganAda.tagihan
-      }
+    const riwayat = await prisma.pembayaran.findMany({
+      where: { pelangganId: Number(id) },
+      orderBy: { createdAt: 'desc' }
     });
 
     res.json({
       status: 'sukses',
-      pesan: `Data ${pelangganDiperbarui.nama} berhasil diperbarui!`,
-      data: pelangganDiperbarui
+      totalTransaksi: riwayat.length,
+      data: riwayat
     });
   } catch (error) {
     res.status(500).json({ status: 'error', pesan: error.message });
@@ -103,7 +195,7 @@ app.put('/api/pelanggan/:id', async (req, res) => {
 });
 
 // 4. Admin Menghapus Pelanggan Berdasarkan ID
-app.delete('/api/pelanggan/:id', async (req, res) => {
+app.delete('/api/pelanggan/:id', verifikasiRole(['ADMIN']), async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -134,9 +226,13 @@ app.delete('/api/pelanggan/:id', async (req, res) => {
 });
 
 // 5. Paman Mencatat Pembayaran + Hitung Kembalian
-app.post('/api/bayar', async (req, res) => {
+app.post('/api/bayar', verifikasiRole(['ADMIN', 'PENAGIH']), async (req, res) => {
   try {
-    const { idPelanggan, uangDiterima } = req.body;
+    const { idPelanggan, uangDiterima, bulan, tahun } = req.body;
+
+    const waktuSekarang = new Date();
+    const targetBulan = bulan ? Number(bulan) : waktuSekarang.getMonth() + 1; // 1 - 12
+    const targetTahun = tahun ? Number(tahun) : waktuSekarang.getFullYear();
 
     const dataPelanggan = await prisma.pelanggan.findUnique({
       where: { id: Number(idPelanggan) }
@@ -144,6 +240,24 @@ app.post('/api/bayar', async (req, res) => {
 
     if (!dataPelanggan) {
       return res.status(404).json({ status: 'gagal', pesan: 'Pelanggan tidak ditemukan' });
+    }
+
+    // Cek apakah bulan tersebut sudah pernah dibayar
+    const sudahBayar = await prisma.pembayaran.findUnique({
+      where: {
+        pelangganId_bulan_tahun: {
+          pelangganId: Number(idPelanggan),
+          bulan: targetBulan,
+          tahun: targetTahun
+        }
+      }
+    });
+
+    if (sudahBayar && sudahBayar.status === 'Lunas') {
+      return res.status(400).json({
+        status: 'gagal',
+        pesan: `Tagihan periode ${targetBulan}/${targetTahun} untuk ${dataPelanggan.nama} sudah lunas!`
+      });
     }
 
     if (uangDiterima < dataPelanggan.tagihan) {
@@ -154,21 +268,26 @@ app.post('/api/bayar', async (req, res) => {
       });
     }
 
-    const uangKembalian = uangDiterima - dataPelanggan.tagihan;
+    const kembalian = uangDiterima - dataPelanggan.tagihan;
 
-    // Perbarui status langsung di database
-    const hasilUpdate = await prisma.pelanggan.update({
-      where: { id: Number(idPelanggan) },
-      data: { lunas: "Lunas" }
+    // Simpan bukti transaksi ke tabel Pembayaran
+    const transaksi = await prisma.pembayaran.create({
+      data: {
+        pelangganId: dataPelanggan.id,
+        bulan: targetBulan,
+        tahun: targetTahun,
+        nominalTagihan: dataPelanggan.tagihan,
+        nominalDiterima: Number(uangDiterima),
+        kembalian: kembalian,
+        status: 'Lunas',
+        namaPenagih: req.user ? req.user.nama : 'Penagih Lapangan'
+      }
     });
 
     res.json({
       status: 'sukses',
-      pesan: `Pembayaran ${hasilUpdate.nama} berhasil dicatat!`,
-      tagihan: hasilUpdate.tagihan,
-      uangDiterima,
-      kembalian: uangKembalian,
-      statusBayar: 'LUNAS'
+      pesan: `Pembayaran ${dataPelanggan.nama} bulan ${targetBulan}/${targetTahun} berhasil dicatat!`,
+      data: transaksi
     });
   } catch (error) {
     res.status(500).json({ status: 'error', pesan: error.message });
@@ -176,46 +295,64 @@ app.post('/api/bayar', async (req, res) => {
 });
 
 // 6. Paman Membatalkan Pembayaran (Undo)
-app.post('/api/batal-bayar', async (req, res) => {
+app.post('/api/batal-bayar', verifikasiRole(['ADMIN', 'PENAGIH']), async (req, res) => {
   try {
-    const { idPelanggan } = req.body;
+    const { idPelanggan, bulan, tahun } = req.body;
 
-    const hasilUpdate = await prisma.pelanggan.update({
-      where: { id: Number(idPelanggan) },
-      data: { lunas: false }
+    const waktuSekarang = new Date();
+    const targetBulan = bulan ? Number(bulan) : waktuSekarang.getMonth() + 1;
+    const targetTahun = tahun ? Number(tahun) : waktuSekarang.getFullYear();
+
+    // Hapus transaksi yang salah input
+    await prisma.pembayaran.delete({
+      where: {
+        pelangganId_bulan_tahun: {
+          pelangganId: Number(idPelanggan),
+          bulan: targetBulan,
+          tahun: targetTahun
+        }
+      }
     });
 
     res.json({
       status: 'sukses',
-      pesan: `Status pembayaran ${hasilUpdate.nama} dibatalkan (kembali BELUM LUNAS)`
+      pesan: `Pembayaran periode ${targetBulan}/${targetTahun} berhasil dibatalkan.`
     });
   } catch (error) {
-    res.status(500).json({ status: 'error', pesan: error.message });
+    res.status(404).json({ status: 'gagal', pesan: 'Transaksi tidak ditemukan atau sudah dibatalkan' });
   }
 });
 
-// 7. Rekap Laporan Keuangan
-app.get('/api/laporan', async (req, res) => {
+// 7. Rekap Laporan Keuangan (Khusus ADMIN)
+app.get('/api/laporan', verifikasiRole(['ADMIN']), async (req, res) => {
   try {
     const semuaPelanggan = await prisma.pelanggan.findMany();
 
-    const sudahLunas = semuaPelanggan.filter((p) => p.lunas);
-    const belumLunas = semuaPelanggan.filter((p) => !p.lunas);
+    // Sesuaikan perbandingan dengan nilai Enum Status_Pembayaran
+    const sudahLunas = semuaPelanggan.filter((p) => p.lunas === 'Lunas');
+    const belumLunas = semuaPelanggan.filter((p) => p.lunas === 'Belum_Lunas');
 
     const totalUangMasuk = sudahLunas.reduce((acc, curr) => acc + curr.tagihan, 0);
     const sisaTertunggak = belumLunas.reduce((acc, curr) => acc + curr.tagihan, 0);
+    const targetPendapatan = totalUangMasuk + sisaTertunggak;
 
     res.json({
       status: 'sukses',
       ringkasan: {
         totalPelanggan: semuaPelanggan.length,
         jumlahSudahBayar: sudahLunas.length,
-        jumlahBelumBayar: belumLunas.length
+        jumlahBelumBayar: belumLunas.length,
       },
       keuangan: {
-        totalUangTerkumpul: `Rp ${totalUangMasuk.toLocaleString('id-ID')}`,
-        sisaTagihanBelumMasuk: `Rp ${sisaTertunggak.toLocaleString('id-ID')}`
-      }
+        totalUangTerkumpul: totalUangMasuk,
+        sisaTagihanBelumMasuk: sisaTertunggak,
+        totalTarget: targetPendapatan,
+        formatRupiah: {
+          totalUangTerkumpul: `Rp ${totalUangMasuk.toLocaleString('id-ID')}`,
+          sisaTagihanBelumMasuk: `Rp ${sisaTertunggak.toLocaleString('id-ID')}`,
+          totalTarget: `Rp ${targetPendapatan.toLocaleString('id-ID')}`,
+        },
+      },
     });
   } catch (error) {
     res.status(500).json({ status: 'error', pesan: error.message });

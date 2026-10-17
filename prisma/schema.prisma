@@ -9,18 +9,51 @@ datasource db {
 }
 
 model Pelanggan {
-  id         Int      @id @default(autoincrement())
+  id         Int               @id @default(autoincrement())
   nama       String
-  kecamatan  String   @default("Kepanjen")
+  kecamatan  String            @default("Kepanjen")
   desa       String
   rt         String
   tagihan    Int
-  lunas      Staturs_Pembayaran  @default(Belum_Lunas)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  pembayaran Pembayaran[]      // Relasi: 1 Pelanggan memiliki banyak riwayat pembayaran
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
 }
 
-enum Staturs_Pembayaran{
+model Pembayaran {
+  id             Int               @id @default(autoincrement())
+  pelangganId    Int
+  pelanggan      Pelanggan         @relation(fields: [pelangganId], references: [id], onDelete: Cascade)
+  bulan          Int               // Contoh: 10 untuk Oktober
+  tahun          Int               // Contoh: 2026
+  nominalTagihan Int
+  nominalDiterima Int
+  kembalian      Int
+  status         Status_Pembayaran @default(Lunas)
+  namaPenagih    String?           // Mencatat siapa penagih yang menerima setoran
+  createdAt      DateTime          @default(now())
+
+  // Mencegah double input: 1 pelanggan hanya bisa bayar 1 kali di bulan dan tahun yang sama
+  @@unique([pelangganId, bulan, tahun])
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  username  String   @unique
+  password  String
+  nama      String
+  role      Role     @default(PENAGIH)
+  createdAt DateTime @default(now())
+}
+
+// 1. Enum untuk Hak Akses Aku
+enum Role {
+  ADMIN
+  PENAGIH
+}
+
+// 2. Enum untuk Status Pembayaran Pelanggan
+enum Status_Pembayaran {
   Lunas
   Belum_Lunas
 }

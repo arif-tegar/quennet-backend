@@ -1,15 +1,26 @@
 const express = require('express');
+const cors = require('cors');
 const { PrismaClient } = require('@prisma/client');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 
 const app = express();
 const prisma = new PrismaClient();
 const PORT = process.env.PORT || 5000;
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-
 const JWT_SECRET = process.env.JWT_SECRET || 'kunci_rahasia_quennet_super_aman_123';
 
+// 1. Pasang CORS di bahagian paling atas sebelum sebarang laluan
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+// 2. Benarkan pelayan membaca JSON
 app.use(express.json());
+
+// Seterusnya di bawah ini barulah fungsi verifikasiRole dan laluan-laluan API anda...
+
 
 // Middleware untuk mengecek token & role
 const verifikasiRole = (rolesDiizinkan = []) => {
@@ -162,11 +173,11 @@ app.get('/api/pelanggan', verifikasiRole(['ADMIN', 'PENAGIH']), async (req, res)
         statusPembayaran: infoBayar ? 'Lunas' : 'Belum_Lunas',
         detailPembayaran: infoBayar
           ? {
-              uangDiterima: infoBayar.nominalDiterima,
-              kembalian: infoBayar.kembalian,
-              penagih: infoBayar.namaPenagih,
-              tanggalBayar: infoBayar.createdAt
-            }
+            uangDiterima: infoBayar.nominalDiterima,
+            kembalian: infoBayar.kembalian,
+            penagih: infoBayar.namaPenagih,
+            tanggalBayar: infoBayar.createdAt
+          }
           : null
       };
     });

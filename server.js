@@ -364,33 +364,57 @@ app.post('/api/batal-bayar', verifikasiRole(['ADMIN', 'PENAGIH']), async (req, r
 });
 
 // 7. Rekap Laporan Keuangan (Khusus ADMIN)
+// 7. Rekap Laporan Keuangan (Khusus ADMIN - Berdasarkan Periode Bulan & Tahun)
 app.get('/api/laporan', verifikasiRole(['ADMIN']), async (req, res) => {
   try {
+    const { bulan, tahun } = req.query;
+
+    const waktuSekarang = new Date();
+    const targetBulan = bulan ? Number(bulan) : waktuSekarang.getMonth() + 1;
+    const targetTahun = tahun ? Number(tahun) : waktuSekarang.getFullYear();
+
+    // 1. Ambil semua pelanggan aktif untuk menghitung target pendapatan
     const semuaPelanggan = await prisma.pelanggan.findMany();
+    const totalPelanggan = semuaPelanggan.length;
+    const totalTargetUang = semuaPelanggan.reduce((acc, curr) => acc + curr.tagihan, 0);
 
-    // Sesuaikan perbandingan dengan nilai Enum Status_Pembayaran
-    const sudahLunas = semuaPelanggan.filter((p) => p.lunas === 'Lunas');
-    const belumLunas = semuaPelanggan.filter((p) => p.lunas === 'Belum_Lunas');
+    // 2. Ambil transaksi yang sudah lunas di periode bulan & tahun yang dipilih
+    const transaksiBulanIni = await prisma.pembayaran.findMany({
+      where: {
+        bulan: targetBulan,
+        tahun: targetTahun,
+        status: 'Lunas',
+      },
+    });
 
-    const totalUangMasuk = sudahLunas.reduce((acc, curr) => acc + curr.tagihan, 0);
-    const sisaTertunggak = belumLunas.reduce((acc, curr) => acc + curr.tagihan, 0);
-    const targetPendapatan = totalUangMasuk + sisaTertunggak;
+    // 3. Kalkulasi uang yang terkumpul
+    const totalUangTerkumpul = transaksiBulanIni.reduce(
+      (acc, curr) => acc + curr.nominalTagihan,
+      0
+    );
+    const jumlahSudahBayar = transaksiBulanIni.length;
+    const jumlahBelumBayar = Math.max(0, totalPelanggan - jumlahSudahBayar);
+    const sisaUangTertunggak = Math.max(0, totalTargetUang - totalUangTerkumpul);
 
     res.json({
       status: 'sukses',
-      ringkasan: {
-        totalPelanggan: semuaPelanggan.length,
-        jumlahSudahBayar: sudahLunas.length,
-        jumlahBelumBayar: belumLunas.length,
+      periode: {
+        bulan: targetBulan,
+        tahun: targetTahun,
+      },
+      ringkasanPelanggan: {
+        totalPelanggan,
+        sudahBayar: jumlahSudahBayar,
+        belumBayar: jumlahBelumBayar,
       },
       keuangan: {
-        totalUangTerkumpul: totalUangMasuk,
-        sisaTagihanBelumMasuk: sisaTertunggak,
-        totalTarget: targetPendapatan,
+        uangTerkumpul: totalUangTerkumpul,
+        uangTertunggak: sisaUangTertunggak,
+        targetTotal: totalTargetUang,
         formatRupiah: {
-          totalUangTerkumpul: `Rp ${totalUangMasuk.toLocaleString('id-ID')}`,
-          sisaTagihanBelumMasuk: `Rp ${sisaTertunggak.toLocaleString('id-ID')}`,
-          totalTarget: `Rp ${targetPendapatan.toLocaleString('id-ID')}`,
+          uangTerkumpul: `Rp ${totalUangTerkumpul.toLocaleString('id-ID')}`,
+          uangTertunggak: `Rp ${sisaUangTertunggak.toLocaleString('id-ID')}`,
+          targetTotal: `Rp ${totalTargetUang.toLocaleString('id-ID')}`,
         },
       },
     });

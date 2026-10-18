@@ -15,7 +15,9 @@ model Pelanggan {
   desa       String
   rt         String
   tagihan    Int
-  pembayaran Pembayaran[]      // Relasi: 1 Pelanggan memiliki banyak riwayat pembayaran
+  bulanMulai Int               @default(10) // Bulan mulai berlangganan (1 - 12)
+  tahunMulai Int               @default(2026) // Tahun mulai berlangganan
+  pembayaran Pembayaran[]
   createdAt  DateTime          @default(now())
   updatedAt  DateTime          @updatedAt
 }

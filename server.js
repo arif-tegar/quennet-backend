@@ -54,7 +54,7 @@ const verifikasiRole = (rolesDiizinkan = []) => {
 };
 
 // Registrasi Akun Baru (Hanya bisa dibuat awal atau oleh Admin)
-app.post('/api/auth/register', async (req, res) => {
+app.post(['/api/auth/register', '/auth/register'], async (req, res) => {
   try {
     const { username, password, nama, role } = req.body;
 
@@ -88,7 +88,7 @@ app.post('/api/auth/register', async (req, res) => {
 });
 
 // Login Akun & Terbitkan Token
-app.post('/api/auth/login', async (req, res) => {
+app.post(['/api/auth/login', '/auth/login'], async (req, res) => {
   try {
     const { username, password } = req.body;
 
@@ -139,25 +139,28 @@ app.get('/api/pelanggan', verifikasiRole(['ADMIN', 'PENAGIH']), async (req, res)
     const targetBulan = bulan ? Number(bulan) : waktuSekarang.getMonth() + 1;
     const targetTahun = tahun ? Number(tahun) : waktuSekarang.getFullYear();
 
-    const whereClause = {};
-    if (desa) whereClause.desa = desa;
-    if (rt) whereClause.rt = rt;
-
-    // Ambil data pelanggan beserta pembayaran KHUSUS di bulan & tahun target
     const listPelanggan = await prisma.pelanggan.findMany({
-      where: whereClause,
+      where: {
+        ...(desa && { desa }),
+        ...(rt && { rt }),
+        // Filter: Hanya tampilkan jika tahunMulai lebih lampau ATAU tahunnya sama tapi bulanMulai <= bulan target
+        OR: [
+          { tahunMulai: { lt: targetTahun } },
+          {
+            tahunMulai: targetTahun,
+            bulanMulai: { lte: targetBulan }
+          }
+        ]
+      },
       include: {
         pembayaran: {
-          where: {
-            bulan: targetBulan,
-            tahun: targetTahun
-          }
+          where: { bulan: targetBulan, tahun: targetTahun }
         }
       },
       orderBy: { nama: 'asc' }
     });
 
-    // Format data agar front-end Next.js mudah membacanya
+    // Formatting data ke front-end
     const dataFormatted = listPelanggan.map((p) => {
       const infoBayar = p.pembayaran[0] || null;
       return {
@@ -167,27 +170,24 @@ app.get('/api/pelanggan', verifikasiRole(['ADMIN', 'PENAGIH']), async (req, res)
         desa: p.desa,
         rt: p.rt,
         tagihan: p.tagihan,
+        bulanMulai: p.bulanMulai,
+        tahunMulai: p.tahunMulai,
         periodeBulan: targetBulan,
         periodeTahun: targetTahun,
-        isLunas: infoBayar ? true : false,
+        isLunas: Boolean(infoBayar),
         statusPembayaran: infoBayar ? 'Lunas' : 'Belum_Lunas',
         detailPembayaran: infoBayar
           ? {
-            uangDiterima: infoBayar.nominalDiterima,
-            kembalian: infoBayar.kembalian,
-            penagih: infoBayar.namaPenagih,
-            tanggalBayar: infoBayar.createdAt
-          }
+              uangDiterima: infoBayar.nominalDiterima,
+              kembalian: infoBayar.kembalian,
+              penagih: infoBayar.namaPenagih,
+              tanggalBayar: infoBayar.createdAt
+            }
           : null
       };
     });
 
-    res.json({
-      status: 'sukses',
-      periode: `${targetBulan}/${targetTahun}`,
-      totalData: dataFormatted.length,
-      data: dataFormatted
-    });
+    res.json({ status: 'sukses', data: dataFormatted });
   } catch (error) {
     res.status(500).json({ status: 'error', pesan: error.message });
   }
@@ -196,14 +196,11 @@ app.get('/api/pelanggan', verifikasiRole(['ADMIN', 'PENAGIH']), async (req, res)
 // 2. Admin Menambah Pelanggan Baru
 app.post('/api/pelanggan', verifikasiRole(['ADMIN']), async (req, res) => {
   try {
-    const { nama, kecamatan, desa, rt, tagihan } = req.body;
+    const { nama, kecamatan, desa, rt, tagihan, bulanMulai, tahunMulai } = req.body;
 
-    if (!nama || !desa || !rt || !tagihan) {
-      return res.status(400).json({
-        status: 'gagal',
-        pesan: 'Nama, desa, RT, dan tagihan wajib diisi'
-      });
-    }
+    const sekarang = new Date();
+    const bulanAwal = bulanMulai ? Number(bulanMulai) : sekarang.getMonth() + 1;
+    const tahunAwal = tahunMulai ? Number(tahunMulai) : sekarang.getFullYear();
 
     const pelangganBaru = await prisma.pelanggan.create({
       data: {
@@ -211,21 +208,61 @@ app.post('/api/pelanggan', verifikasiRole(['ADMIN']), async (req, res) => {
         kecamatan: kecamatan || 'Kepanjen',
         desa,
         rt,
-        tagihan: Number(tagihan)
+        tagihan: Number(tagihan),
+        bulanMulai: bulanAwal,
+        tahunMulai: tahunAwal
       }
     });
 
-    res.status(201).json({
-      status: 'sukses',
-      pesan: 'Pelanggan baru berhasil disimpan ke database!',
-      data: pelangganBaru
-    });
+    res.status(201).json({ status: 'sukses', data: pelangganBaru });
   } catch (error) {
     res.status(500).json({ status: 'error', pesan: error.message });
   }
 });
 
 // 3. Admin Mengubah (Edit) Data Pelanggan Berdasarkan ID
+app.put('/api/pelanggan/:id', verifikasiRole(['ADMIN']), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nama, kecamatan, desa, rt, tagihan, bulanMulai, tahunMulai } = req.body;
+
+    // Periksa apakah pelanggan dengan ID ini ada
+    const pelangganAda = await prisma.pelanggan.findUnique({
+      where: { id: Number(id) }
+    });
+
+    if (!pelangganAda) {
+      return res.status(404).json({
+        status: 'gagal',
+        pesan: `Pelanggan dengan ID ${id} tidak ditemukan`
+      });
+    }
+
+    // Perbarui data pelanggan di database
+    const pelangganDiperbarui = await prisma.pelanggan.update({
+      where: { id: Number(id) },
+      data: {
+        nama: nama || pelangganAda.nama,
+        kecamatan: kecamatan || pelangganAda.kecamatan,
+        desa: desa || pelangganAda.desa,
+        rt: rt || pelangganAda.rt,
+        tagihan: tagihan !== undefined ? Number(tagihan) : pelangganAda.tagihan,
+        bulanMulai: bulanMulai !== undefined ? Number(bulanMulai) : pelangganAda.bulanMulai,
+        tahunMulai: tahunMulai !== undefined ? Number(tahunMulai) : pelangganAda.tahunMulai
+      }
+    });
+
+    res.json({
+      status: 'sukses',
+      pesan: `Data ${pelangganDiperbarui.nama} berhasil diperbarui!`,
+      data: pelangganDiperbarui
+    });
+  } catch (error) {
+    res.status(500).json({ status: 'error', pesan: error.message });
+  }
+});
+
+// 4. Riwayat Pembayaran Pelanggan Berdasarkan ID
 app.get('/api/pelanggan/:id/riwayat', verifikasiRole(['ADMIN', 'PENAGIH']), async (req, res) => {
   try {
     const { id } = req.params;
@@ -245,7 +282,7 @@ app.get('/api/pelanggan/:id/riwayat', verifikasiRole(['ADMIN', 'PENAGIH']), asyn
   }
 });
 
-// 4. Admin Menghapus Pelanggan Berdasarkan ID
+// 5. Admin Menghapus Pelanggan Berdasarkan ID
 app.delete('/api/pelanggan/:id', verifikasiRole(['ADMIN']), async (req, res) => {
   try {
     const { id } = req.params;
@@ -276,7 +313,7 @@ app.delete('/api/pelanggan/:id', verifikasiRole(['ADMIN']), async (req, res) => 
   }
 });
 
-// 5. Paman Mencatat Pembayaran + Hitung Kembalian
+// 6. Mencatat Pembayaran + Hitung Kembalian
 app.post('/api/bayar', verifikasiRole(['ADMIN', 'PENAGIH']), async (req, res) => {
   try {
     const { idPelanggan, uangDiterima, bulan, tahun } = req.body;
@@ -345,7 +382,7 @@ app.post('/api/bayar', verifikasiRole(['ADMIN', 'PENAGIH']), async (req, res) =>
   }
 });
 
-// 6. Paman Membatalkan Pembayaran (Undo)
+// 7. Membatalkan Pembayaran (Undo)
 app.post('/api/batal-bayar', verifikasiRole(['ADMIN', 'PENAGIH']), async (req, res) => {
   try {
     const { idPelanggan, bulan, tahun } = req.body;
@@ -374,60 +411,55 @@ app.post('/api/batal-bayar', verifikasiRole(['ADMIN', 'PENAGIH']), async (req, r
   }
 });
 
-// 7. Rekap Laporan Keuangan (Khusus ADMIN)
-// 7. Rekap Laporan Keuangan (Khusus ADMIN - Berdasarkan Periode Bulan & Tahun)
+// 8. Rekap Laporan Keuangan (Khusus ADMIN - Berdasarkan Periode Bulan & Tahun)
 app.get('/api/laporan', verifikasiRole(['ADMIN']), async (req, res) => {
   try {
     const { bulan, tahun } = req.query;
+    const sekarang = new Date();
+    const targetBulan = bulan ? Number(bulan) : sekarang.getMonth() + 1;
+    const targetTahun = tahun ? Number(tahun) : sekarang.getFullYear();
 
-    const waktuSekarang = new Date();
-    const targetBulan = bulan ? Number(bulan) : waktuSekarang.getMonth() + 1;
-    const targetTahun = tahun ? Number(tahun) : waktuSekarang.getFullYear();
-
-    // 1. Ambil semua pelanggan aktif untuk menghitung target pendapatan
-    const semuaPelanggan = await prisma.pelanggan.findMany();
-    const totalPelanggan = semuaPelanggan.length;
-    const totalTargetUang = semuaPelanggan.reduce((acc, curr) => acc + curr.tagihan, 0);
-
-    // 2. Ambil transaksi yang sudah lunas di periode bulan & tahun yang dipilih
-    const transaksiBulanIni = await prisma.pembayaran.findMany({
+    // Hitung pelanggan yang sudah aktif di periode target
+    const pelangganAktifDiPeriode = await prisma.pelanggan.findMany({
       where: {
-        bulan: targetBulan,
-        tahun: targetTahun,
-        status: 'Lunas',
-      },
+        OR: [
+          { tahunMulai: { lt: targetTahun } },
+          {
+            tahunMulai: targetTahun,
+            bulanMulai: { lte: targetBulan }
+          }
+        ]
+      }
     });
 
-    // 3. Kalkulasi uang yang terkumpul
-    const totalUangTerkumpul = transaksiBulanIni.reduce(
-      (acc, curr) => acc + curr.nominalTagihan,
-      0
-    );
-    const jumlahSudahBayar = transaksiBulanIni.length;
-    const jumlahBelumBayar = Math.max(0, totalPelanggan - jumlahSudahBayar);
-    const sisaUangTertunggak = Math.max(0, totalTargetUang - totalUangTerkumpul);
+    const totalPelanggan = pelangganAktifDiPeriode.length;
+    const totalTargetUang = pelangganAktifDiPeriode.reduce((acc, curr) => acc + curr.tagihan, 0);
+
+    const transaksiBulanIni = await prisma.pembayaran.findMany({
+      where: { bulan: targetBulan, tahun: targetTahun, status: 'Lunas' }
+    });
+
+    const totalUangMasuk = transaksiBulanIni.reduce((acc, curr) => acc + curr.nominalTagihan, 0);
+    const sisaUangTertunggak = Math.max(0, totalTargetUang - totalUangMasuk);
 
     res.json({
       status: 'sukses',
-      periode: {
-        bulan: targetBulan,
-        tahun: targetTahun,
-      },
+      periode: { bulan: targetBulan, tahun: targetTahun },
       ringkasanPelanggan: {
         totalPelanggan,
-        sudahBayar: jumlahSudahBayar,
-        belumBayar: jumlahBelumBayar,
+        sudahBayar: transaksiBulanIni.length,
+        belumBayar: Math.max(0, totalPelanggan - transaksiBulanIni.length)
       },
       keuangan: {
-        uangTerkumpul: totalUangTerkumpul,
+        uangTerkumpul: totalUangMasuk,
         uangTertunggak: sisaUangTertunggak,
         targetTotal: totalTargetUang,
         formatRupiah: {
-          uangTerkumpul: `Rp ${totalUangTerkumpul.toLocaleString('id-ID')}`,
+          uangTerkumpul: `Rp ${totalUangMasuk.toLocaleString('id-ID')}`,
           uangTertunggak: `Rp ${sisaUangTertunggak.toLocaleString('id-ID')}`,
-          targetTotal: `Rp ${totalTargetUang.toLocaleString('id-ID')}`,
-        },
-      },
+          targetTotal: `Rp ${totalTargetUang.toLocaleString('id-ID')}`
+        }
+      }
     });
   } catch (error) {
     res.status(500).json({ status: 'error', pesan: error.message });

@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "Pelanggan" ADD COLUMN     "bulanMulai" INTEGER NOT NULL DEFAULT 10,
+ADD COLUMN     "tahunMulai" INTEGER NOT NULL DEFAULT 2026;

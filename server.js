@@ -9,69 +9,17 @@ const prisma = new PrismaClient();
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'kunci_rahasia_quennet_super_aman_123';
 
-// ==================== IN-MEMORY CACHE SYSTEM ====================
-// Caching super cepat untuk data besar (pelanggan & laporan)
+// ==================== REDIS CACHE SYSTEM ====================
+// Caching super cepat dengan Redis (dengan fallback ke memory jika offline)
 // Mengurangi beban database dan mempercepat response hingga sub-milidetik (<2ms)
-class SimpleCache {
-  constructor(defaultTTLMs = 5 * 60 * 1000) { // Default TTL: 5 menit
-    this.cache = new Map();
-    this.defaultTTL = defaultTTLMs;
-  }
-
-  get(key) {
-    const item = this.cache.get(key);
-    if (!item) return null;
-    if (Date.now() > item.expiry) {
-      this.cache.delete(key);
-      return null;
-    }
-    return item.value;
-  }
-
-  set(key, value, ttlMs = this.defaultTTL) {
-    this.cache.set(key, {
-      value,
-      expiry: Date.now() + ttlMs,
-      cachedAt: new Date().toISOString()
-    });
-  }
-
-  delete(key) {
-    this.cache.delete(key);
-  }
-
-  // Hapus semua cache yang diawali prefix (contoh: 'pelanggan:' atau 'laporan:')
-  invalidatePrefix(prefix) {
-    let deletedCount = 0;
-    for (const key of this.cache.keys()) {
-      if (key.startsWith(prefix)) {
-        this.cache.delete(key);
-        deletedCount++;
-      }
-    }
-    return deletedCount;
-  }
-
-  // Bersihkan semua cache
-  clear() {
-    const count = this.cache.size;
-    this.cache.clear();
-    return count;
-  }
-
-  size() {
-    return this.cache.size;
-  }
-}
-
-const apiCache = new SimpleCache(5 * 60 * 1000); // Cache selama 5 menit
-
+const { cacheService: apiCache } = require('./cache');
 
 // 1. Pasang CORS di bahagian paling atas sebelum sebarang laluan
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-refresh-cache']
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-refresh-cache'],
+  exposedHeaders: ['X-Cache', 'X-Cache-Store']
 }));
 
 // 2. Benarkan pelayan membaca JSON
@@ -191,11 +139,30 @@ app.post(['/api/auth/login', '/auth/login'], async (req, res) => {
 // 1. Ambil Pelanggan Lengkap dengan Status Lunas Bulan Ini
 app.get('/api/pelanggan', verifikasiRole(['ADMIN', 'PENAGIH']), async (req, res) => {
   try {
-    const { desa, rt, bulan, tahun } = req.query;
+    const { desa, rt, bulan, tahun, refresh } = req.query;
 
     const waktuSekarang = new Date();
     const targetBulan = bulan ? Number(bulan) : waktuSekarang.getMonth() + 1;
     const targetTahun = tahun ? Number(tahun) : waktuSekarang.getFullYear();
+
+    // Cache key unik berdasarkan filter query
+    const cacheKey = `pelanggan:${desa || 'all'}:${rt || 'all'}:${targetBulan}:${targetTahun}`;
+    const isForceRefresh = refresh === 'true' || req.headers['x-refresh-cache'] === 'true';
+
+    // Jika bukan force refresh, cek cache terlebih dahulu (Redis / In-memory)
+    if (!isForceRefresh) {
+      const cachedData = await apiCache.get(cacheKey);
+      if (cachedData) {
+        res.setHeader('X-Cache', 'HIT');
+        res.setHeader('X-Cache-Store', apiCache.getStoreType());
+        return res.json({
+          status: 'sukses',
+          data: cachedData,
+          fromCache: true,
+          cacheStore: apiCache.getStoreType()
+        });
+      }
+    }
 
     const listPelanggan = await prisma.pelanggan.findMany({
       where: {
@@ -245,7 +212,17 @@ app.get('/api/pelanggan', verifikasiRole(['ADMIN', 'PENAGIH']), async (req, res)
       };
     });
 
-    res.json({ status: 'sukses', data: dataFormatted });
+    // Simpan hasil ke cache (Redis) untuk request berikutnya
+    await apiCache.set(cacheKey, dataFormatted);
+
+    res.setHeader('X-Cache', isForceRefresh ? 'BYPASS' : 'MISS');
+    res.setHeader('X-Cache-Store', apiCache.getStoreType());
+    res.json({
+      status: 'sukses',
+      data: dataFormatted,
+      fromCache: false,
+      cacheStore: apiCache.getStoreType()
+    });
   } catch (error) {
     res.status(500).json({ status: 'error', pesan: error.message });
   }
@@ -273,8 +250,8 @@ app.post('/api/pelanggan', verifikasiRole(['ADMIN']), async (req, res) => {
     });
 
     // Invalidate cache agar data baru langsung masuk di query berikutnya
-    apiCache.invalidatePrefix('pelanggan:');
-    apiCache.invalidatePrefix('laporan:');
+    await apiCache.invalidatePrefix('pelanggan:');
+    await apiCache.invalidatePrefix('laporan:');
 
     res.status(201).json({ status: 'sukses', data: pelangganBaru });
   } catch (error) {
@@ -313,6 +290,10 @@ app.put('/api/pelanggan/:id', verifikasiRole(['ADMIN']), async (req, res) => {
         tahunMulai: tahunMulai !== undefined ? Number(tahunMulai) : pelangganAda.tahunMulai
       }
     });
+
+    // Invalidate cache pelanggan dan laporan
+    await apiCache.invalidatePrefix('pelanggan:');
+    await apiCache.invalidatePrefix('laporan:');
 
     res.json({
       status: 'sukses',
@@ -365,6 +346,10 @@ app.delete('/api/pelanggan/:id', verifikasiRole(['ADMIN']), async (req, res) => 
     await prisma.pelanggan.delete({
       where: { id: Number(id) }
     });
+
+    // Invalidate cache pelanggan dan laporan
+    await apiCache.invalidatePrefix('pelanggan:');
+    await apiCache.invalidatePrefix('laporan:');
 
     res.json({
       status: 'sukses',
@@ -434,6 +419,10 @@ app.post('/api/bayar', verifikasiRole(['ADMIN', 'PENAGIH']), async (req, res) =>
       }
     });
 
+    // Invalidate cache pelanggan dan laporan
+    await apiCache.invalidatePrefix('pelanggan:');
+    await apiCache.invalidatePrefix('laporan:');
+
     res.json({
       status: 'sukses',
       pesan: `Pembayaran ${dataPelanggan.nama} bulan ${targetBulan}/${targetTahun} berhasil dicatat!`,
@@ -464,6 +453,10 @@ app.post('/api/batal-bayar', verifikasiRole(['ADMIN', 'PENAGIH']), async (req, r
       }
     });
 
+    // Invalidate cache pelanggan dan laporan
+    await apiCache.invalidatePrefix('pelanggan:');
+    await apiCache.invalidatePrefix('laporan:');
+
     res.json({
       status: 'sukses',
       pesan: `Pembayaran periode ${targetBulan}/${targetTahun} berhasil dibatalkan.`
@@ -476,10 +469,27 @@ app.post('/api/batal-bayar', verifikasiRole(['ADMIN', 'PENAGIH']), async (req, r
 // 8. Rekap Laporan Keuangan (Khusus ADMIN - Berdasarkan Periode Bulan & Tahun)
 app.get('/api/laporan', verifikasiRole(['ADMIN']), async (req, res) => {
   try {
-    const { bulan, tahun } = req.query;
+    const { bulan, tahun, refresh } = req.query;
     const sekarang = new Date();
     const targetBulan = bulan ? Number(bulan) : sekarang.getMonth() + 1;
     const targetTahun = tahun ? Number(tahun) : sekarang.getFullYear();
+
+    const cacheKey = `laporan:${targetBulan}:${targetTahun}`;
+    const isForceRefresh = refresh === 'true' || req.headers['x-refresh-cache'] === 'true';
+
+    // Cek cache jika bukan force refresh
+    if (!isForceRefresh) {
+      const cachedData = await apiCache.get(cacheKey);
+      if (cachedData) {
+        res.setHeader('X-Cache', 'HIT');
+        res.setHeader('X-Cache-Store', apiCache.getStoreType());
+        return res.json({
+          ...cachedData,
+          fromCache: true,
+          cacheStore: apiCache.getStoreType()
+        });
+      }
+    }
 
     // Hitung pelanggan yang sudah aktif di periode target
     const pelangganAktifDiPeriode = await prisma.pelanggan.findMany({
@@ -504,7 +514,7 @@ app.get('/api/laporan', verifikasiRole(['ADMIN']), async (req, res) => {
     const totalUangMasuk = transaksiBulanIni.reduce((acc, curr) => acc + curr.nominalTagihan, 0);
     const sisaUangTertunggak = Math.max(0, totalTargetUang - totalUangMasuk);
 
-    res.json({
+    const responseData = {
       status: 'sukses',
       periode: { bulan: targetBulan, tahun: targetTahun },
       ringkasanPelanggan: {
@@ -522,6 +532,31 @@ app.get('/api/laporan', verifikasiRole(['ADMIN']), async (req, res) => {
           targetTotal: `Rp ${totalTargetUang.toLocaleString('id-ID')}`
         }
       }
+    };
+
+    // Simpan ke cache
+    await apiCache.set(cacheKey, responseData);
+
+    res.setHeader('X-Cache', isForceRefresh ? 'BYPASS' : 'MISS');
+    res.setHeader('X-Cache-Store', apiCache.getStoreType());
+    res.json({
+      ...responseData,
+      fromCache: false,
+      cacheStore: apiCache.getStoreType()
+    });
+  } catch (error) {
+    res.status(500).json({ status: 'error', pesan: error.message });
+  }
+});
+
+// 9. Endpoint Cek Status & Statistik Cache Redis
+app.get('/api/cache-status', async (req, res) => {
+  try {
+    const stats = await apiCache.getStats();
+    res.json({
+      status: 'sukses',
+      pesan: 'Status cache backend berhasil dimuat',
+      data: stats
     });
   } catch (error) {
     res.status(500).json({ status: 'error', pesan: error.message });
